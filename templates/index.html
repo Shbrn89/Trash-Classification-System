@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Trash Classification System</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+    <main class="page">
+        <section class="hero">
+            <div class="hero-badge">Traditional Machine Learning</div>
+            <h1>Trash Classification System</h1>
+            <p>
+                Upload an image of waste and the system will classify it using
+                HOG, Color Histogram, LBP, Shape Features, and XGBoost.
+            </p>
+        </section>
+
+        <section class="content">
+            <div class="upload-card">
+                <h2>Upload Waste Image</h2>
+                <p class="subtitle">
+                    Supported formats: JPG, JPEG, PNG, BMP, and WEBP.
+                </p>
+
+                <form method="POST" enctype="multipart/form-data" class="upload-form">
+                    <label for="image" class="drop-area">
+                        <img id="preview" alt="Image preview">
+                        <div id="placeholder" class="placeholder">
+                            <span class="upload-icon">⬆</span>
+                            <strong>Choose an image</strong>
+                            <small>Click here to browse file</small>
+                        </div>
+                    </label>
+
+                    <input type="file" name="image" id="image" accept="image/*" required>
+
+                    <button type="submit">Predict Waste Type</button>
+                </form>
+
+                {% if error %}
+                    <div class="message error">{{ error }}</div>
+                {% endif %}
+
+                {% if warning %}
+                    <div class="message warning">{{ warning }}</div>
+                {% endif %}
+
+                {% if note %}
+                    <div class="message note">{{ note }}</div>
+                {% endif %}
+            </div>
+
+            <div class="result-card">
+                <h2>Prediction Result</h2>
+
+                {% if prediction %}
+                    <div class="prediction-box">
+                        <p class="label">Predicted class</p>
+                        <p class="prediction">{{ prediction }}</p>
+
+                        {% if confidence %}
+                            <p class="confidence">
+                                Confidence score: {{ "%.2f"|format(confidence) }}%
+                            </p>
+                        {% endif %}
+                    </div>
+
+                    {% if top_predictions %}
+                        <div class="top-list">
+                            <h3>Top 3 Predictions</h3>
+
+                            {% for item in top_predictions %}
+                                <div class="top-item">
+                                    <span>{{ item.class_name }}</span>
+
+                                    <div class="bar">
+                                        <div class="bar-fill" data-width="{{ item.probability }}"></div>
+                                    </div>
+
+                                    <strong>{{ item.probability }}%</strong>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    {% endif %}
+
+                    {% if image_path %}
+                        <img src="{{ image_path }}" alt="Uploaded image" class="result-image">
+                    {% endif %}
+                {% else %}
+                    <div class="empty-state">
+                        <p>No prediction yet.</p>
+                        <small>Upload an image to see the result.</small>
+                    </div>
+                {% endif %}
+            </div>
+        </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

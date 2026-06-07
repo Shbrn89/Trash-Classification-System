@@ -1,0 +1,10 @@
+flask
+opencv-python
+scikit-image
+scikit-learn
+xgboost
+numpy
+matplotlib
+seaborn
+tqdm
+joblib
