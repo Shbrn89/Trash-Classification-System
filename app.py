@@ -38,12 +38,16 @@ def make_prediction_variants(image):
     variants = []
 
     variants.append(image)
+    variants.append(image)
     variants.append(cv2.convertScaleAbs(image, alpha=1.06, beta=8))
     variants.append(cv2.convertScaleAbs(image, alpha=0.94, beta=-8))
+    variants.append(cv2.convertScaleAbs(image, alpha=1.12, beta=0))
+    variants.append(cv2.convertScaleAbs(image, alpha=0.88, beta=0))
+    variants.append(cv2.flip(image, 1))
 
     h, w = image.shape[:2]
 
-    for angle in [-5, 5]:
+    for angle in [-10, -5, 5, 10]:
         matrix = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
 
         rotated = cv2.warpAffine(
@@ -54,6 +58,20 @@ def make_prediction_variants(image):
         )
 
         variants.append(rotated)
+
+    for crop_ratio in [0.92, 0.86]:
+        crop_h = int(h * crop_ratio)
+        crop_w = int(w * crop_ratio)
+        y1 = max(0, (h - crop_h) // 2)
+        x1 = max(0, (w - crop_w) // 2)
+        cropped = image[y1:y1 + crop_h, x1:x1 + crop_w]
+
+        if cropped.size > 0:
+            variants.append(cv2.resize(cropped, (w, h)))
+
+    blurred = cv2.GaussianBlur(image, (0, 0), 1.0)
+    sharpened = cv2.addWeighted(image, 1.35, blurred, -0.35, 0)
+    variants.append(sharpened)
 
     return variants
 
@@ -110,9 +128,14 @@ def apply_domain_correction(image, prediction, confidence, top_predictions, prob
 
     looks_like_plastic_bottle = looks_vertical and (looks_transparent or has_blue_part)
 
-    wrong_material_prediction = prediction in ["paper", "cardboard", "metal", "glass"]
+    wrong_material_prediction = prediction in ["paper", "cardboard", "metal"]
+    uncertain_glass_prediction = (
+        prediction == "glass" and
+        plastic_probability >= 30 and
+        confidence - plastic_probability <= 18
+    )
 
-    if wrong_material_prediction and looks_like_plastic_bottle and plastic_probability >= 10:
+    if (wrong_material_prediction or uncertain_glass_prediction) and looks_like_plastic_bottle and plastic_probability >= 10:
         prediction = "plastic"
         confidence = max(confidence, plastic_probability)
 
