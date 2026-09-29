@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from skimage.feature import hog, local_binary_pattern
 
-IMAGE_SIZE = (96, 96)
+IMAGE_SIZE = (112, 112)
 
 
 def apply_white_balance(image):
@@ -37,10 +37,18 @@ def create_fast_mask(image):
     mask = mask.astype(np.uint8) * 255
 
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, otsu_mask = cv2.threshold(
+        blurred,
+        0,
+        255,
+        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
+
     edges = cv2.Canny(blurred, 35, 120)
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
 
     mask = cv2.bitwise_or(mask, edges)
+    mask = cv2.bitwise_or(mask, otsu_mask)
 
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
@@ -51,7 +59,7 @@ def create_fast_mask(image):
 
 def preprocess_image(image):
     image = apply_white_balance(image)
-    resized = cv2.resize(image, (160, 160))
+    resized = cv2.resize(image, (192, 192))
 
     mask = create_fast_mask(resized)
 
@@ -71,8 +79,8 @@ def preprocess_image(image):
         cropped_mask = cv2.resize(mask, IMAGE_SIZE)
         return cropped, cropped_mask
 
-    x_min = 160
-    y_min = 160
+    x_min = 192
+    y_min = 192
     x_max = 0
     y_max = 0
 
@@ -84,12 +92,12 @@ def preprocess_image(image):
         x_max = max(x_max, x + w)
         y_max = max(y_max, y + h)
 
-    padding = 12
+    padding = 16
 
     x_min = max(0, x_min - padding)
     y_min = max(0, y_min - padding)
-    x_max = min(160, x_max + padding)
-    y_max = min(160, y_max + padding)
+    x_max = min(192, x_max + padding)
+    y_max = min(192, y_max + padding)
 
     cropped = resized[y_min:y_max, x_min:x_max]
     cropped_mask = mask[y_min:y_max, x_min:x_max]
@@ -123,6 +131,42 @@ def extract_hog_features(cropped):
     return features.astype(np.float32)
 
 
+def normalize_histogram(hist):
+    hist = cv2.normalize(hist, hist).flatten()
+    return hist.astype(np.float32)
+
+
+def extract_channel_statistics(cropped, mask):
+    hsv = cv2.cvtColor(cropped, cv2.COLOR_BGR2HSV)
+    lab = cv2.cvtColor(cropped, cv2.COLOR_BGR2LAB)
+
+    mask_bool = mask > 0
+
+    if np.sum(mask_bool) < 80:
+        mask_bool = np.ones(mask.shape, dtype=bool)
+
+    spaces = [
+        (cropped.astype(np.float32), [255.0, 255.0, 255.0]),
+        (hsv.astype(np.float32), [180.0, 255.0, 255.0]),
+        (lab.astype(np.float32), [255.0, 255.0, 255.0])
+    ]
+
+    stats = []
+
+    for space, scales in spaces:
+        for channel_index, scale in enumerate(scales):
+            values = space[:, :, channel_index][mask_bool] / scale
+
+            stats.extend([
+                float(np.mean(values)),
+                float(np.std(values)),
+                float(np.percentile(values, 25)),
+                float(np.percentile(values, 75))
+            ])
+
+    return np.array(stats, dtype=np.float32)
+
+
 def extract_color_histogram(cropped, mask):
     hsv = cv2.cvtColor(cropped, cv2.COLOR_BGR2HSV)
     lab = cv2.cvtColor(cropped, cv2.COLOR_BGR2LAB)
@@ -134,17 +178,17 @@ def extract_color_histogram(cropped, mask):
     hsv_s = cv2.calcHist([hsv], [1], mask, [32], [0, 256])
     hsv_v = cv2.calcHist([hsv], [2], mask, [32], [0, 256])
 
-    hsv_h = cv2.normalize(hsv_h, hsv_h).flatten()
-    hsv_s = cv2.normalize(hsv_s, hsv_s).flatten()
-    hsv_v = cv2.normalize(hsv_v, hsv_v).flatten()
+    hsv_h = normalize_histogram(hsv_h)
+    hsv_s = normalize_histogram(hsv_s)
+    hsv_v = normalize_histogram(hsv_v)
 
     lab_l = cv2.calcHist([lab], [0], mask, [16], [0, 256])
     lab_a = cv2.calcHist([lab], [1], mask, [16], [0, 256])
     lab_b = cv2.calcHist([lab], [2], mask, [16], [0, 256])
 
-    lab_l = cv2.normalize(lab_l, lab_l).flatten()
-    lab_a = cv2.normalize(lab_a, lab_a).flatten()
-    lab_b = cv2.normalize(lab_b, lab_b).flatten()
+    lab_l = normalize_histogram(lab_l)
+    lab_a = normalize_histogram(lab_a)
+    lab_b = normalize_histogram(lab_b)
 
     h, w = hsv.shape[:2]
 
@@ -162,9 +206,9 @@ def extract_color_histogram(cropped, mask):
         region_s = cv2.calcHist([region], [1], None, [12], [0, 256])
         region_v = cv2.calcHist([region], [2], None, [12], [0, 256])
 
-        region_h = cv2.normalize(region_h, region_h).flatten()
-        region_s = cv2.normalize(region_s, region_s).flatten()
-        region_v = cv2.normalize(region_v, region_v).flatten()
+        region_h = normalize_histogram(region_h)
+        region_s = normalize_histogram(region_s)
+        region_v = normalize_histogram(region_v)
 
         spatial_features.extend(region_h)
         spatial_features.extend(region_s)
@@ -177,7 +221,8 @@ def extract_color_histogram(cropped, mask):
         lab_l,
         lab_a,
         lab_b,
-        np.array(spatial_features, dtype=np.float32)
+        np.array(spatial_features, dtype=np.float32),
+        extract_channel_statistics(cropped, mask)
     ])
 
     return features.astype(np.float32)
@@ -186,26 +231,29 @@ def extract_color_histogram(cropped, mask):
 def extract_lbp_features(cropped):
     gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
 
-    radius = 1
-    points = 8 * radius
+    features = []
 
-    lbp = local_binary_pattern(
-        gray,
-        points,
-        radius,
-        method="uniform"
-    )
+    for radius in [1, 2]:
+        points = 8 * radius
 
-    hist, _ = np.histogram(
-        lbp.ravel(),
-        bins=np.arange(0, points + 3),
-        range=(0, points + 2)
-    )
+        lbp = local_binary_pattern(
+            gray,
+            points,
+            radius,
+            method="uniform"
+        )
 
-    hist = hist.astype(np.float32)
-    hist = hist / (hist.sum() + 1e-7)
+        hist, _ = np.histogram(
+            lbp.ravel(),
+            bins=np.arange(0, points + 3),
+            range=(0, points + 2)
+        )
 
-    return hist
+        hist = hist.astype(np.float32)
+        hist = hist / (hist.sum() + 1e-7)
+        features.append(hist)
+
+    return np.concatenate(features).astype(np.float32)
 
 
 def extract_shape_features(cropped, mask):
@@ -221,7 +269,7 @@ def extract_shape_features(cropped, mask):
     ]
 
     if len(valid_contours) == 0:
-        return np.zeros(12, dtype=np.float32)
+        return np.zeros(25, dtype=np.float32)
 
     largest = max(valid_contours, key=cv2.contourArea)
 
@@ -240,6 +288,8 @@ def extract_shape_features(cropped, mask):
     perimeter_ratio = perimeter / (2 * (IMAGE_SIZE[0] + IMAGE_SIZE[1]))
     width_ratio = w / IMAGE_SIZE[0]
     height_ratio = h / IMAGE_SIZE[1]
+    center_x_ratio = (x + (w / 2.0)) / IMAGE_SIZE[0]
+    center_y_ratio = (y + (h / 2.0)) / IMAGE_SIZE[1]
 
     hull = cv2.convexHull(largest)
     hull_area = cv2.contourArea(hull)
@@ -257,6 +307,18 @@ def extract_shape_features(cropped, mask):
     mean_saturation = np.mean(hsv[:, :, 1][mask_bool]) / 255.0
     mean_value = np.mean(hsv[:, :, 2][mask_bool]) / 255.0
 
+    circularity = (4.0 * np.pi * area) / ((perimeter * perimeter) + 1e-7)
+    equivalent_diameter_ratio = np.sqrt((4.0 * area) / (np.pi + 1e-7)) / IMAGE_SIZE[0]
+
+    edges = cv2.Canny(gray, 45, 130)
+    edge_density = np.sum((edges > 0) & mask_bool) / (np.sum(mask_bool) + 1e-7)
+    contour_count_ratio = min(len(valid_contours), 12) / 12.0
+
+    moments = cv2.moments(largest)
+    hu_moments = cv2.HuMoments(moments).flatten()
+    hu_moments = -np.sign(hu_moments) * np.log10(np.abs(hu_moments) + 1e-12)
+    hu_moments = np.clip(hu_moments / 10.0, -1.0, 1.0)
+
     features = np.array([
         area_ratio,
         bbox_ratio,
@@ -269,7 +331,14 @@ def extract_shape_features(cropped, mask):
         mean_gray,
         mean_saturation,
         mean_value,
-        area_ratio * height_ratio
+        area_ratio * height_ratio,
+        circularity,
+        equivalent_diameter_ratio,
+        contour_count_ratio,
+        edge_density,
+        center_x_ratio,
+        center_y_ratio,
+        *hu_moments
     ], dtype=np.float32)
 
     return features
