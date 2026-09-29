@@ -3,8 +3,14 @@ import shutil
 from pathlib import Path
 from tqdm import tqdm
 
-RAW_DATASET_DIR = Path("trash_project/dataset/raw/garbage_classification")
-FINAL_DATASET_DIR = Path("trash_project/dataset/final")
+RAW_DATASET_CANDIDATES = [
+    Path("dataset/garbage_classification")
+]
+RAW_DATASET_DIR = next(
+    (path for path in RAW_DATASET_CANDIDATES if path.exists()),
+    RAW_DATASET_CANDIDATES[0]
+)
+FINAL_DATASET_DIR = Path("dataset/final")
 
 FINAL_CLASSES = [
     "cardboard",
@@ -26,12 +32,7 @@ CLASS_MAPPING = {
     "white-glass": "glass",
     "glass": "glass",
 
-    "biological": "trash",
-    "trash": "trash",
-    "clothes": "trash",
-    "shoes": "trash",
-    "batteries": "trash",
-    "battery": "trash"
+    "trash": "trash"
 }
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -77,7 +78,7 @@ def copy_images_to_final(class_folders):
             if file.is_file() and file.suffix.lower() in IMAGE_EXTENSIONS
         ]
 
-        print(f"\nMapping {source_class} → {target_class}")
+        print(f"\nMapping {source_class} -> {target_class}")
         print(f"Images found: {len(image_files)}")
 
         for image_file in tqdm(image_files):
@@ -138,7 +139,6 @@ def main():
         "green-glass",
         "brown-glass",
         "white-glass",
-        "biological",
         "trash"
     ]
 
