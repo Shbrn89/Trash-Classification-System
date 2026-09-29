@@ -10,6 +10,7 @@ import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.pipeline import Pipeline
+from sklearn.utils.class_weight import compute_sample_weight
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
 from sklearn.ensemble import RandomForestClassifier
@@ -27,13 +28,17 @@ except Exception:
     pass
 
 
-DATASET_DIR = "trash_project/dataset/raw/garbage_classification"
+RAW_DATASET_DIR = "dataset/garbage_classification"
+FINAL_DATASET_DIR = "dataset/final"
+DATASET_SOURCE = "raw" if os.path.exists(RAW_DATASET_DIR) else "final"
+DATASET_DIR = RAW_DATASET_DIR if DATASET_SOURCE == "raw" else FINAL_DATASET_DIR
 
 MODEL_DIR = "model"
 MODEL_PATH = os.path.join(MODEL_DIR, "trash_xgboost_model.pkl")
-FEATURE_CACHE_PATH = os.path.join(MODEL_DIR, "feature_cache_12class_xgb_v1.npz")
+FEATURE_CACHE_PATH = os.path.join(MODEL_DIR, "feature_cache_6class_glassmerge_xgb_v2.npz")
+LEGACY_12CLASS_CACHE_PATH = os.path.join(MODEL_DIR, "feature_cache_12class_xgb_v1.npz")
 
-CLASSES = [
+LEGACY_SOURCE_CLASSES = [
     "battery",
     "biological",
     "brown-glass",
@@ -48,6 +53,33 @@ CLASSES = [
     "white-glass"
 ]
 
+CLASSES = [
+    "cardboard",
+    "glass",
+    "metal",
+    "paper",
+    "plastic",
+    "trash"
+]
+
+SOURCE_CLASS_MAPPING = {
+    "cardboard": "cardboard",
+    "brown-glass": "glass",
+    "green-glass": "glass",
+    "white-glass": "glass",
+    "metal": "metal",
+    "paper": "paper",
+    "plastic": "plastic",
+    "trash": "trash"
+}
+
+SOURCE_CLASSES = list(SOURCE_CLASS_MAPPING.keys())
+
+CLASS_TO_ID = {
+    class_name: index
+    for index, class_name in enumerate(CLASSES)
+}
+
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
@@ -56,21 +88,58 @@ CPU_COUNT = os.cpu_count() or 4
 N_JOBS_FEATURE = max(1, CPU_COUNT - 1)
 
 RUN_COMPARISON = False
+AUGMENT_TRAINING = True
 
 
 def collect_dataset():
     image_paths = []
     labels = []
+    target_counts = {class_name: 0 for class_name in CLASSES}
 
     print("\nReading dataset...")
 
-    for label_id, class_name in enumerate(CLASSES):
-        class_dir = os.path.join(DATASET_DIR, class_name)
+    if DATASET_SOURCE == "final":
+        for label_id, class_name in enumerate(CLASSES):
+            class_dir = os.path.join(DATASET_DIR, class_name)
+
+            if not os.path.exists(class_dir):
+                raise FileNotFoundError(
+                    f"Folder tidak ditemukan: {class_dir}\n"
+                    "Pastikan dataset final berisi folder sesuai CLASSES."
+                )
+
+            files = [
+                file for file in os.listdir(class_dir)
+                if file.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp"))
+            ]
+
+            files = sorted(files)
+
+            if len(files) == 0:
+                raise ValueError(f"Tidak ada gambar di folder: {class_dir}")
+
+            print(f"{class_name}: {len(files)} images")
+
+            for file in files:
+                image_paths.append(os.path.join(class_dir, file))
+                labels.append(label_id)
+
+            target_counts[class_name] += len(files)
+
+        if len(image_paths) == 0:
+            raise ValueError("Dataset kosong. Cek ulang folder dataset kamu.")
+
+        return np.array(image_paths), np.array(labels)
+
+    for source_class in SOURCE_CLASSES:
+        target_class = SOURCE_CLASS_MAPPING[source_class]
+        label_id = CLASS_TO_ID[target_class]
+        class_dir = os.path.join(DATASET_DIR, source_class)
 
         if not os.path.exists(class_dir):
             raise FileNotFoundError(
                 f"Folder tidak ditemukan: {class_dir}\n"
-                "Pastikan nama folder dataset sama persis dengan CLASSES."
+                "Pastikan nama folder dataset sama persis dengan SOURCE_CLASSES."
             )
 
         files = [
@@ -83,30 +152,64 @@ def collect_dataset():
         if len(files) == 0:
             raise ValueError(f"Tidak ada gambar di folder: {class_dir}")
 
-        print(f"{class_name}: {len(files)} images")
+        print(f"{source_class} -> {target_class}: {len(files)} images")
 
         for file in files:
             image_paths.append(os.path.join(class_dir, file))
             labels.append(label_id)
 
+        target_counts[target_class] += len(files)
+
     if len(image_paths) == 0:
         raise ValueError("Dataset kosong. Cek ulang folder dataset kamu.")
+
+    print("\nMerged class counts:")
+    for class_name in CLASSES:
+        print(f"{class_name}: {target_counts[class_name]} images")
 
     return np.array(image_paths), np.array(labels)
 
 
-def process_single_image(path, label):
+def make_training_variants(image):
+    variants = [
+        image,
+        cv2.flip(image, 1),
+        cv2.convertScaleAbs(image, alpha=1.08, beta=8),
+        cv2.convertScaleAbs(image, alpha=0.92, beta=-8)
+    ]
+
+    h, w = image.shape[:2]
+
+    for angle in [-8, 8]:
+        matrix = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
+        rotated = cv2.warpAffine(
+            image,
+            matrix,
+            (w, h),
+            borderMode=cv2.BORDER_REFLECT
+        )
+        variants.append(rotated)
+
+    return variants
+
+
+def process_single_image(path, label, augment=False):
     image = cv2.imread(path)
 
     if image is None:
-        return None
+        return []
 
-    features = extract_features_from_image(image)
+    variants = make_training_variants(image) if augment else [image]
+    results = []
 
-    return features, int(label)
+    for variant in variants:
+        features = extract_features_from_image(variant)
+        results.append((features, int(label)))
+
+    return results
 
 
-def build_feature_matrix_parallel(image_paths, labels):
+def build_feature_matrix_parallel(image_paths, labels, augment=False):
     print(f"\nUsing {N_JOBS_FEATURE} CPU workers for feature extraction...")
 
     results = joblib.Parallel(
@@ -114,21 +217,20 @@ def build_feature_matrix_parallel(image_paths, labels):
         backend="loky",
         verbose=10
     )(
-        joblib.delayed(process_single_image)(path, label)
+        joblib.delayed(process_single_image)(path, label, augment)
         for path, label in zip(image_paths, labels)
     )
 
     feature_list = []
     label_list = []
 
-    for item in results:
-        if item is None:
+    for image_results in results:
+        if len(image_results) == 0:
             continue
 
-        features, label = item
-
-        feature_list.append(features)
-        label_list.append(label)
+        for features, label in image_results:
+            feature_list.append(features)
+            label_list.append(label)
 
     X = np.array(feature_list, dtype=np.float32)
     y = np.array(label_list, dtype=np.int32)
@@ -138,18 +240,20 @@ def build_feature_matrix_parallel(image_paths, labels):
 
 def create_xgboost_model():
     model = XGBClassifier(
-        n_estimators=300,
-        max_depth=4,
-        learning_rate=0.05,
-        subsample=0.9,
-        colsample_bytree=0.8,
-        min_child_weight=1,
-        reg_lambda=1.6,
-        reg_alpha=0.08,
+        n_estimators=450,
+        max_depth=5,
+        learning_rate=0.035,
+        subsample=0.85,
+        colsample_bytree=0.75,
+        min_child_weight=2,
+        gamma=0.10,
+        reg_lambda=2.0,
+        reg_alpha=0.12,
         objective="multi:softprob",
         num_class=len(CLASSES),
         eval_metric="mlogloss",
         tree_method="hist",
+        max_bin=256,
         n_jobs=-1,
         random_state=SEED
     )
@@ -217,25 +321,51 @@ def save_cache(X_train, y_train, X_test, y_test):
 
 
 def load_cache():
-    if not os.path.exists(FEATURE_CACHE_PATH):
-        return None
+    if os.path.exists(FEATURE_CACHE_PATH):
+        print("\nLoading feature cache...")
 
-    print("\nLoading feature cache...")
+        data = np.load(FEATURE_CACHE_PATH)
 
-    data = np.load(FEATURE_CACHE_PATH)
+        return (
+            data["X_train"],
+            data["y_train"],
+            data["X_test"],
+            data["y_test"]
+        )
+
+    return None
+
+
+def filter_and_remap_source_labels(X, source_labels):
+    keep_indices = []
+    remapped_labels = []
+
+    for row_index, label in enumerate(source_labels):
+        source_class = LEGACY_SOURCE_CLASSES[int(label)]
+        target_class = SOURCE_CLASS_MAPPING.get(source_class)
+
+        if target_class is None:
+            continue
+
+        keep_indices.append(row_index)
+        remapped_labels.append(CLASS_TO_ID[target_class])
+
+    keep_indices = np.array(keep_indices, dtype=np.int32)
 
     return (
-        data["X_train"],
-        data["y_train"],
-        data["X_test"],
-        data["y_test"]
+        X[keep_indices],
+        np.array(remapped_labels, dtype=np.int32)
     )
 
 
 def save_confusion_matrix(y_test, y_pred):
-    cm = confusion_matrix(y_test, y_pred)
+    cm = confusion_matrix(
+        y_test,
+        y_pred,
+        labels=list(range(len(CLASSES)))
+    )
 
-    plt.figure(figsize=(12, 9))
+    plt.figure(figsize=(10, 8))
     sns.heatmap(
         cm,
         annot=True,
@@ -247,9 +377,9 @@ def save_confusion_matrix(y_test, y_pred):
 
     plt.xlabel("Predicted Label")
     plt.ylabel("True Label")
-    plt.title("Confusion Matrix - 12 Class XGBoost Trash Classification")
-    plt.xticks(rotation=45, ha="right")
-    plt.yticks(rotation=0)
+    plt.title("Confusion Matrix - HOG + Color + LBP + Shape + XGBoost")
+    plt.xticks(rotation=0)
+    plt.yticks(rotation=90, va="center")
 
     output_path = os.path.join(MODEL_DIR, "confusion_matrix.png")
 
@@ -317,13 +447,15 @@ def main():
         print("\nExtracting train features...")
         X_train, y_train = build_feature_matrix_parallel(
             train_paths,
-            train_labels
+            train_labels,
+            augment=AUGMENT_TRAINING
         )
 
         print("\nExtracting test features...")
         X_test, y_test = build_feature_matrix_parallel(
             test_paths,
-            test_labels
+            test_labels,
+            augment=False
         )
 
         save_cache(X_train, y_train, X_test, y_test)
@@ -333,7 +465,11 @@ def main():
 
     print("\nTraining primary model: XGBoost")
     primary_model = create_xgboost_model()
-    primary_model.fit(X_train, y_train)
+    sample_weights = compute_sample_weight(
+        class_weight="balanced",
+        y=y_train
+    )
+    primary_model.fit(X_train, y_train, sample_weight=sample_weights)
 
     print("Training finished.")
 
@@ -390,7 +526,7 @@ def main():
         "model": primary_model,
         "classes": CLASSES,
         "image_size": IMAGE_SIZE,
-        "feature_method": "HOG + Color Histogram + LBP + Shape Features",
+        "feature_method": "Enhanced HOG + Color Stats + Multi-radius LBP + Shape",
         "classifier": "XGBoost",
         "accuracy": float(accuracy),
         "comparison_results": comparison_results
